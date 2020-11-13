@@ -68,6 +68,9 @@ namespace IFix.Editor
         //system("mono ifix.exe [args]")
         public static void CallIFix(List<string> args)
         {
+            IFix.Program.GenPath(args.ToArray());
+
+            return;
 #if UNITY_EDITOR_OSX
             var mono_path = Path.Combine(Path.GetDirectoryName(typeof(UnityEngine.Debug).Module.FullyQualifiedName),
                 "../MonoBleedingEdge/bin/mono");
@@ -226,7 +229,7 @@ namespace IFix.Editor
 
             var filters = Configure.GetFilters();
 
-            var processCfgPath = "./process_cfg";
+            var processCfgPath = "./process_cfg" + assembly;
 
             //该程序集是否有配置了些类，如果没有就跳过注入操作
             bool hasSomethingToDo = false;
@@ -283,8 +286,7 @@ namespace IFix.Editor
 
             if (hasSomethingToDo)
             {
-
-                var core_path = "./Assets/Plugins/IFix.Core.dll";
+                var core_path = string.Format("./Library/{0}/IFixCore.dll", GetScriptAssembliesFolder());
                 var assembly_path = string.Format("./Library/{0}/{1}.dll", targetAssembliesFolder, assembly);
                 var patch_path = string.Format("./{0}.ill.bytes", assembly);
                 List<string> args = new List<string>() { "-inject", core_path, assembly_path,
@@ -305,7 +307,7 @@ namespace IFix.Editor
                 CallIFix(args);
             }
 
-            File.Delete(processCfgPath);
+            //File.Delete(processCfgPath);
         }
 
         /// <summary>
@@ -663,7 +665,7 @@ namespace IFix.Editor
             foreach (var assembly in injectAssemblys)
             {
                 GenPatch(assembly, string.Format("{0}/{1}.dll", outputDir, assembly),
-                    "./Assets/Plugins/IFix.Core.dll", string.Format("{0}{1}.patch.bytes", patchOutputDir, assembly));
+                    corePath, string.Format("{0}{1}.patch.bytes", patchOutputDir, assembly));
             }
 #else
             throw new NotImplementedException();
@@ -781,7 +783,7 @@ namespace IFix.Editor
                 throw new InvalidDataException("not support generic method: " + genericMethod);
             }
 
-            var processCfgPath = "./process_cfg";
+            var processCfgPath = "./process_cfg" + assembly;
 
             using (BinaryWriter writer = new BinaryWriter(new FileStream(processCfgPath, FileMode.Create,
                 FileAccess.Write)))
@@ -808,7 +810,7 @@ namespace IFix.Editor
 
             CallIFix(args);
 
-            File.Delete(processCfgPath);
+            //File.Delete(processCfgPath);
 
             AssetDatabase.Refresh();
         }
@@ -816,13 +818,14 @@ namespace IFix.Editor
         [MenuItem("InjectFix/Fix", false, 2)]
         public static void Patch()
         {
+            var core_path = string.Format("./Library/{0}/IFixCore.dll", GetScriptAssembliesFolder());
             EditorUtility.DisplayProgressBar("Generate Patch for Edtior", "patching...", 0);
             try
             {
                 foreach (var assembly in injectAssemblys)
                 {
                     var assembly_path = string.Format("./Library/{0}/{1}.dll", GetScriptAssembliesFolder(), assembly);
-                    GenPatch(assembly, assembly_path, "./Assets/Plugins/IFix.Core.dll",
+                    GenPatch(assembly, assembly_path, core_path,
                         string.Format("{0}.patch.bytes", assembly));
                 }
             }
@@ -840,7 +843,8 @@ namespace IFix.Editor
             EditorUtility.DisplayProgressBar("Generate Patch for Android", "patching...", 0);
             try
             {
-                GenPlatformPatch(Platform.android, "");
+                var core_path = string.Format("./Library/{0}/IFixCore.dll", GetScriptAssembliesFolder());
+                GenPlatformPatch(Platform.android, core_path);
             }
             catch(Exception e)
             {
@@ -855,7 +859,8 @@ namespace IFix.Editor
             EditorUtility.DisplayProgressBar("Generate Patch for IOS", "patching...", 0);
             try
             {
-                GenPlatformPatch(Platform.ios, "");
+                var core_path = string.Format("./Library/{0}/IFixCore.dll", GetScriptAssembliesFolder());
+                GenPlatformPatch(Platform.ios, core_path);
             }
             catch(Exception e)
             {
