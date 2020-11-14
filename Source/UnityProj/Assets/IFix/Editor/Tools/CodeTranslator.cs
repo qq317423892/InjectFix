@@ -45,6 +45,7 @@ namespace IFix
 
         private Dictionary<MethodReference, int> virtualMethodToIndex = new Dictionary<MethodReference, int>();
         const string Wrap_Perfix = "__Gen_Wrap_";
+        const string InjectPrepareClassName = "__InjectClass_{0}";
 
         int nextAllocId = 0;
 
@@ -101,8 +102,8 @@ namespace IFix
             var td = type as TypeDefinition;
             return td != null
                 && !td.IsInterface
-                && isNewClass(td);
-            //&& (td.BaseType.IsSameType(objType) || isCustomClassPlainObject(td.BaseType as TypeReference));
+                && isNewClass(td)
+                && (td.BaseType.IsSameType(objType) || isCustomClassPlainObject(td.BaseType as TypeReference));
         }
 
         bool isCompilerGeneratedByNotPlainObject(TypeReference type)
@@ -262,6 +263,15 @@ namespace IFix
             if (doNoAdd(caller))
             {
                 return ushort.MaxValue;
+            }
+
+            if (callee.Name == "AwaitUnsafeOnCompleted")
+            {
+                
+                if (!awaitUnsafeOnCompletedMethods.Any(m => ((GenericInstanceMethod)callee).GenericArguments[0] == ((GenericInstanceMethod)m).GenericArguments[0]))
+                {
+                    awaitUnsafeOnCompletedMethods.Add(callee);
+                }
             }
 
             if (externMethodToId.ContainsKey(callee))
@@ -1068,13 +1078,12 @@ namespace IFix
             }
 
             //如果是dll之外的方法，或者是构造函数，析构函数，作为虚拟机之外（extern）的方法
-            if (method == null || (method.IsConstructor && method.DeclaringType.IsSameType(objType))///!(isCompilerGeneratedPlainObject(method.DeclaringType) || isCustomClassPlainObject(method.DeclaringType)))
-                || !method.IsConstructor &&
-                    ( method.IsFinalizer()
-                    || method.IsAbstract || method.IsPInvokeImpl || method.Body == null
-                    || method.DeclaringType.IsInterface
-                    || (!methodToInjectType.ContainsKey(method) && !(isCompilerGenerated(method.DeclaringType) || isNewClass(method.DeclaringType))
-                    && !isCompilerGenerated(method) && !(mode == ProcessMode.Patch && isNewMethod(method)))))
+            if (method == null || (method.IsConstructor && !(isCompilerGeneratedPlainObject(method.DeclaringType) || isCustomClassPlainObject(method.DeclaringType)))
+                || method.IsFinalizer()
+                || method.IsAbstract || method.IsPInvokeImpl || method.Body == null
+                || method.DeclaringType.IsInterface
+                || (!methodToInjectType.ContainsKey(method) && !(isCompilerGenerated(method.DeclaringType) || isNewClass(method.DeclaringType))
+                && !isCompilerGenerated(method) && !(mode == ProcessMode.Patch && isNewMethod(method))))
             {
                 //Debug.Log("do no tranlater:" + callee + "," + callee.GetType());
 
@@ -2020,7 +2029,7 @@ namespace IFix
             var typeDefinition = ctor != null ? (ctor.DeclaringType as TypeDefinition) : (variableType as TypeDefinition);
             addInterfacesOfTypeToBridge(typeDefinition);
             var methods = typeDefinition.Methods.Where(m => !m.IsConstructor).ToList();
-            if(variableType != null)
+            if(variableType != null || ctor.DeclaringType.Fields.Count > 0)
             {
                 for (int field = 0; field < typeDefinition.Fields.Count; field++)
                 {
@@ -2163,6 +2172,28 @@ namespace IFix
                 addInterfaceToBridge(ii.InterfaceType.FillGenericArgument(null, itf).TryImport(itf.Module));
             }
         }
+        void EmitRefAwaitUnsafeOnCompletedMethod()
+        {
+            MethodDefinition targetMethod = new MethodDefinition("RefAwaitUnsafeOnCompleteMethod",
+                Mono.Cecil.MethodAttributes.Public, assembly.MainModule.TypeSystem.Void);
+            var instructions = targetMethod.Body.Instructions;
+            var localBridge = new VariableDefinition(itfBridgeType);
+            targetMethod.Body.Variables.Add(localBridge);
+            for (int j = 0;j < awaitUnsafeOnCompletedMethods.Count;j++)
+            {
+                var localTaskAwaiter = new VariableDefinition(((GenericInstanceMethod)awaitUnsafeOnCompletedMethods[j]).GenericArguments[0]);
+                targetMethod.Body.Variables.Add(localTaskAwaiter);
+                var localAsync = new VariableDefinition(awaitUnsafeOnCompletedMethods[j].DeclaringType);
+                targetMethod.Body.Variables.Add(localAsync);
+                instructions.Add(Instruction.Create(OpCodes.Ldloca_S, localAsync));
+                instructions.Add(Instruction.Create(OpCodes.Ldloca_S, localTaskAwaiter));
+                instructions.Add(Instruction.Create(OpCodes.Ldloca_S, localBridge));
+                instructions.Add(Instruction.Create(OpCodes.Call, makeGenericMethod(awaitUnsafeOnCompletedMethods[j].GetElementMethod(), ((GenericInstanceMethod)awaitUnsafeOnCompletedMethods[j]).GenericArguments[0], itfBridgeType)));
+            }
+            instructions.Add(Instruction.Create(OpCodes.Ret));
+            itfBridgeType.Methods.Add(targetMethod);
+        }
+
 
         /// <summary>
         /// 获取一个方法的适配器
@@ -2491,9 +2522,9 @@ namespace IFix
                         instructions.Add(Instruction.Create(OpCodes.Ldloca_S, call));
 
                         emitLdcI4(instructions, refPos[i]);
-                        if (getMap.ContainsKey(paramRawType))
+                        if (paramRawType.IsPrimitive && getMap.ContainsKey(paramRawType.Resolve()))
                         {
-                            instructions.Add(Instruction.Create(OpCodes.Callvirt, getMap[paramRawType]));
+                            instructions.Add(Instruction.Create(OpCodes.Callvirt, getMap[paramRawType.Resolve()]));
                         }
                         else
                         {
@@ -2510,7 +2541,8 @@ namespace IFix
                 instructions.Add(Instruction.Create(OpCodes.Ldloca_S, call));
                 MethodReference get;
                 emitLdcI4(instructions, refCount);
-                if (getMap.TryGetValue(tryGetUnderlyingType(returnType), out get))
+                var returnRawType = tryGetUnderlyingType(returnType);
+                if (returnRawType.IsPrimitive && getMap.TryGetValue(returnRawType.Resolve(), out get))
                 {
                     instructions.Add(Instruction.Create(OpCodes.Callvirt, get));
                 }
@@ -3188,6 +3220,7 @@ namespace IFix
         bool hasRedirect = false;
         ProcessMode mode;
         GenerateConfigure configure;
+        List<MethodReference> awaitUnsafeOnCompletedMethods = new List<MethodReference>();
 
         public ProcessResult Process(AssemblyDefinition assembly, AssemblyDefinition ilfixAassembly,
             GenerateConfigure configure, ProcessMode mode)
@@ -3258,6 +3291,12 @@ namespace IFix
             if (mode == ProcessMode.Inject)
             {
                 redirectFieldRename();
+                if (awaitUnsafeOnCompletedMethods.Count != 0)
+                {
+                    EmitRefAwaitUnsafeOnCompletedMethod();
+                }
+				
+				injectNewClass(assembly);
             }
 
             return ProcessResult.OK;
@@ -3880,6 +3919,98 @@ namespace IFix
             }
             
         }
-    }
+       
+        private void injectNewClass(AssemblyDefinition assembly)
+        {
+            string typeName = "Helloworld";
+            var baseClassType = assembly.MainModule.Types.Single(t => t.Name == typeName);
+            if (null == baseClassType)
+            {
+                return;
+            }
 
+            var dictType = typeof(Dictionary<string, object>);
+            List<Type> paramSet = new List<Type>();
+            List<Type> paramGet = new List<Type>();
+            System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Default |
+                System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.Public;
+
+            paramSet.Add(Type.GetType("System.String"));
+            paramSet.Add(Type.GetType("System.Object"));
+            paramGet.Add(Type.GetType("System.String"));
+
+            System.Reflection.MethodInfo setMethodInfo = dictType.GetMethod(
+                "set_Item",
+                flags,
+                null,
+                paramSet.ToArray(),
+                null);
+
+            System.Reflection.MethodInfo getMethodInfo = dictType.GetMethod(
+                "get_Item",
+                flags,
+                null,
+                paramGet.ToArray(),
+                null);
+
+           
+            var baseType = assembly.MainModule.ImportReference(baseClassType);
+            var filedType = assembly.MainModule.ImportReference(dictType);
+            var dictTypeDef = filedType.Resolve();
+
+            string name = string.Format(InjectPrepareClassName, baseType.Name);
+            TypeDefinition baseTypeDerive = new TypeDefinition(baseType.Namespace, name, Mono.Cecil.TypeAttributes.Class
+                | Mono.Cecil.TypeAttributes.Public, baseType);
+            assembly.MainModule.Types.Add(baseTypeDerive);
+
+            var dictSetFunc = assembly.MainModule.ImportReference(setMethodInfo);
+            var dictGetFunc = assembly.MainModule.ImportReference(getMethodInfo);
+
+            var dictField = new FieldDefinition("m_fields", Mono.Cecil.FieldAttributes.Private,
+                    filedType);
+
+            baseTypeDerive.Fields.Add(dictField);
+
+
+            var GetFiledFuc = new MethodDefinition("GetField", MethodAttributes.Public
+               | MethodAttributes.HideBySig
+               | MethodAttributes.NewSlot
+               | MethodAttributes.Virtual
+               | MethodAttributes.Final, objType);
+
+            var SetFiledFuc = new MethodDefinition("SetField", MethodAttributes.Public
+               | MethodAttributes.HideBySig
+               | MethodAttributes.NewSlot
+               | MethodAttributes.Virtual
+               | MethodAttributes.Final, assembly.MainModule.TypeSystem.Void);
+
+            GetFiledFuc.Parameters.Add(new ParameterDefinition("name", Mono.Cecil.ParameterAttributes.None,
+               assembly.MainModule.TypeSystem.String));
+
+            SetFiledFuc.Parameters.Add(new ParameterDefinition("name", Mono.Cecil.ParameterAttributes.None,
+               assembly.MainModule.TypeSystem.String));
+
+            SetFiledFuc.Parameters.Add(new ParameterDefinition("obj", Mono.Cecil.ParameterAttributes.None,
+              objType));
+
+            baseTypeDerive.Methods.Add(GetFiledFuc);
+            baseTypeDerive.Methods.Add(SetFiledFuc);
+
+            var instructions = GetFiledFuc.Body.Instructions;
+            instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            instructions.Add(Instruction.Create(OpCodes.Ldfld, dictField));
+            instructions.Add(Instruction.Create(OpCodes.Ldarg_1));
+            instructions.Add(Instruction.Create(OpCodes.Callvirt, dictGetFunc));
+            instructions.Add(Instruction.Create(OpCodes.Ret));
+
+            instructions = SetFiledFuc.Body.Instructions;
+            instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            instructions.Add(Instruction.Create(OpCodes.Ldfld, dictField));
+            instructions.Add(Instruction.Create(OpCodes.Ldarg_1));
+            instructions.Add(Instruction.Create(OpCodes.Ldarg_2));
+            instructions.Add(Instruction.Create(OpCodes.Callvirt, dictSetFunc));
+            instructions.Add(Instruction.Create(OpCodes.Ret));
+        }
+    }
 }
